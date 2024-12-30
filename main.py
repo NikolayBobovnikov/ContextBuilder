@@ -55,9 +55,48 @@ class MarkdownGeneratorApp:
         self.scrollbar.grid(row=0, column=1, sticky="ns")
         self.tree.configure(yscrollcommand=self.scrollbar.set)
 
+        # Important: bind a single click handler on the entire tree, but skip if user clicks the plus sign.
+        self.tree.bind("<Button-1>", self.on_tree_click)
+
         # Button to generate markdown
-        self.generate_button = tk.Button(self.root, text="Generate Markdown", command=self.generate_markdown, state=tk.DISABLED)
+        self.generate_button = tk.Button(
+            self.root,
+            text="Generate Markdown",
+            command=self.generate_markdown,
+            state=tk.DISABLED
+        )
         self.generate_button.grid(row=2, column=0, pady=10)
+
+    def on_tree_click(self, event):
+        """Handle single clicks in the Treeview, ignoring expand/collapse clicks."""
+        # Identify the exact element the user clicked (e.g., the expand arrow)
+        element = self.tree.identify("element", event.x, event.y)
+        if element in ("open", "close"):
+            # User is just expanding or collapsing the tree, do not toggle
+            return
+
+        region = self.tree.identify("region", event.x, event.y)
+        if region != "tree":
+            # Ignore clicks in other areas (e.g., scrollbar)
+            return
+
+        # Identify which item was clicked
+        item = self.tree.identify_row(event.y)
+        if not item:
+            return
+
+        tags = self.tree.item(item, "tags")
+        if not tags:
+            return
+
+        # Toggle based on current tag
+        if 'unchecked' in tags:
+            self.check_item(item)
+        else:
+            self.uncheck_item(item)
+
+        # Update Generate button
+        self.check_generate_button_state()
 
     def open_directory(self):
         self.directory = filedialog.askdirectory()
@@ -92,8 +131,8 @@ class MarkdownGeneratorApp:
             return True
         for pattern in self.gitignore_patterns:
             if pattern.endswith('/'):
-                if fnmatch.fnmatch(relative_path + '/', pattern) or \
-                   fnmatch.fnmatch(relative_path, pattern[:-1]):
+                if (fnmatch.fnmatch(relative_path + '/', pattern) or
+                    fnmatch.fnmatch(relative_path, pattern[:-1])):
                     return True
             else:
                 if fnmatch.fnmatch(relative_path, pattern):
@@ -107,49 +146,61 @@ class MarkdownGeneratorApp:
                 continue
 
             # Insert item with an unchecked checkbox
-            node = self.tree.insert(parent_node, 'end', text=f"☐ {entry}", open=False, tags=('unchecked',))
+            node = self.tree.insert(
+                parent_node,
+                'end',
+                text=f"☐ {entry}",
+                open=False,
+                tags=('unchecked',)
+            )
 
             if os.path.isdir(full_path):
                 self.populate_tree(full_path, node)
 
-            # Add checkbox toggle logic
-            self.tree.tag_bind('unchecked', '<Button-1>', self.toggle_item)
-            self.tree.tag_bind('checked', '<Button-1>', self.toggle_item)
-
-             # Adjust scrollbar
+            # Adjust scrollbar
             self.tree.update_idletasks()
             self.scrollbar.configure(command=self.tree.yview)
-
-    def toggle_item(self, event):
-        item = self.tree.identify('item', event.x, event.y)
-        tag = self.tree.item(item, "tags")[0]
-        if tag == 'unchecked':
-            self.check_item(item)
-        else:
-            self.uncheck_item(item)
-
-        # Check if the generate button should be enabled
-        self.check_generate_button_state()
 
     def update_parent(self, item):
         parent = self.tree.parent(item)
         if parent:
             children = self.tree.get_children(parent)
-            all_checked = all(self.tree.item(child, 'tags')[0] == 'checked' for child in children)
+            all_checked = all('checked' in self.tree.item(child, 'tags') for child in children)
             if all_checked:
-                self.tree.item(parent, tags=('checked',), text=f"☑ {self.tree.item(parent, 'text')[2:]}")
+                # If all children are checked, parent is considered checked.
+                self.tree.item(
+                    parent,
+                    tags=('checked',),
+                    text=f"☑ {self.tree.item(parent, 'text')[2:]}"
+                )
             else:
-                self.tree.item(parent, tags=('unchecked',), text=f"☐ {self.tree.item(parent, 'text')[2:]}")
+                # If any child is unchecked, parent becomes unchecked.
+                self.tree.item(
+                    parent,
+                    tags=('unchecked',),
+                    text=f"☐ {self.tree.item(parent, 'text')[2:]}"
+                )
+            # Recursively go up
             self.update_parent(parent)
 
     def check_item(self, item):
-        self.tree.item(item, tags=('checked',), text=f"☑ {self.tree.item(item, 'text')[2:]}")
+        """Mark this item and all children as checked."""
+        self.tree.item(
+            item,
+            tags=('checked',),
+            text=f"☑ {self.tree.item(item, 'text')[2:]}"
+        )
         for child in self.tree.get_children(item):
             self.check_item(child)
         self.update_parent(item)
 
     def uncheck_item(self, item):
-        self.tree.item(item, tags=('unchecked',), text=f"☐ {self.tree.item(item, 'text')[2:]}")
+        """Mark this item and all children as unchecked."""
+        self.tree.item(
+            item,
+            tags=('unchecked',),
+            text=f"☐ {self.tree.item(item, 'text')[2:]}"
+        )
         for child in self.tree.get_children(item):
             self.uncheck_item(child)
         self.update_parent(item)
@@ -196,16 +247,20 @@ class MarkdownGeneratorApp:
             messagebox.showerror("Encoding Error", f"Error writing markdown file: {str(e)}")
 
     def get_selected_files(self):
+        """Return a list of checked files. We always recurse into sub-nodes,
+        even if the parent is unchecked, so that child items can be individually checked."""
         selected_files = []
 
         def collect_files(node, parent_path):
-            item_path = os.path.join(parent_path, self.tree.item(node, 'text')[2:])  # Skip checkbox character
-            if self.tree.item(node, 'tags')[0] == 'checked':
-                if os.path.isfile(item_path):
-                    selected_files.append(item_path)
-                else:
-                    for child in self.tree.get_children(node):
-                        collect_files(child, item_path)
+            item_text = self.tree.item(node, 'text')[2:]  # skip "☐ " or "☑ "
+            item_path = os.path.join(parent_path, item_text)
+            # If node is a file and is checked, include it
+            if os.path.isfile(item_path) and ('checked' in self.tree.item(node, 'tags')):
+                selected_files.append(item_path)
+            # Always recurse into children, in case they are independently checked
+            if os.path.isdir(item_path):
+                for child in self.tree.get_children(node):
+                    collect_files(child, item_path)
 
         for child in self.tree.get_children():
             collect_files(child, self.directory)
@@ -216,8 +271,7 @@ class MarkdownGeneratorApp:
         structure = self.generate_project_structure(selected_files)
         file_contents = self.get_selected_file_contents(selected_files)
 
-        markdown_text = f"""\
-{MARKDOWN_HEADER_CONTEXT}
+        markdown_text = f"""{MARKDOWN_HEADER_CONTEXT}
 
 {MARKDOWN_HEADER_STRUCTURE}
 {structure}
@@ -225,7 +279,6 @@ class MarkdownGeneratorApp:
 {MARKDOWN_HEADER_FILES}
 {file_contents}
 """
-
         return markdown_text
 
     def generate_project_structure(self, selected_files):
@@ -244,10 +297,17 @@ class MarkdownGeneratorApp:
                 branch = f"{indent}├── {basename}/" if level > 0 else basename
                 structure.append(branch)
 
-                selected_files_in_dir = [f for f in files if os.path.join(root, f) in selected_files and not self.is_ignored(os.path.join(root, f))]
+                selected_files_in_dir = [
+                    f for f in files
+                    if os.path.join(root, f) in selected_files
+                       and not self.is_ignored(os.path.join(root, f))
+                ]
                 for i, file in enumerate(selected_files_in_dir):
                     file_indent = indent + "    " if i == len(selected_files_in_dir) - 1 else indent + "│   "
-                    structure.append(f"{file_indent}└── {file}" if i == len(selected_files_in_dir) - 1 else f"{file_indent}├── {file}")
+                    structure.append(
+                        f"{file_indent}└── {file}" if i == len(selected_files_in_dir) - 1
+                        else f"{file_indent}├── {file}"
+                    )
 
         return "\n".join(structure)
 
@@ -263,7 +323,9 @@ class MarkdownGeneratorApp:
 
             relative_file = os.path.relpath(file, self.directory)
             file_extension = self.get_file_extension(file)
-            content.append(f"### {relative_file}\n\n{MARKDOWN_CODE_BLOCK}{file_extension}\n{file_content}\n{MARKDOWN_CODE_BLOCK}")
+            content.append(
+                f"### {relative_file}\n\n{MARKDOWN_CODE_BLOCK}{file_extension}\n{file_content}\n{MARKDOWN_CODE_BLOCK}"
+            )
         
         return "\n\n".join(content)
 
@@ -335,6 +397,7 @@ class MarkdownGeneratorApp:
     def get_file_extension(file):
         return file.split(".")[-1]
 
+
 class FileChangeHandler(FileSystemEventHandler):
     def __init__(self, app, file_path):
         self.app = app
@@ -344,12 +407,8 @@ class FileChangeHandler(FileSystemEventHandler):
         if event.src_path == self.file_path:
             self.app.update_markdown_for_file(self.file_path)
 
+
 if __name__ == "__main__":
     root = tk.Tk()
     app = MarkdownGeneratorApp(root)
     root.mainloop()
-
-
-
-
-
