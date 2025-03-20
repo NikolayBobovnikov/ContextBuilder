@@ -2,3 +2,5 @@
 venv/
 env/
 build/
+__pycache__/
+node_modules/
