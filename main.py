@@ -10,9 +10,9 @@ import difflib
 
 
 # Constants for markdown structure
-MARKDOWN_HEADER_CONTEXT = "## Context"
-MARKDOWN_HEADER_STRUCTURE = "### Project Structure"
-MARKDOWN_HEADER_FILES = "### Files"
+MARKDOWN_HEADER_CONTEXT = "# Context"
+MARKDOWN_HEADER_STRUCTURE = "## Project Structure"
+MARKDOWN_HEADER_FILES = "## Files"
 MARKDOWN_CODE_BLOCK = "```"
 
 
