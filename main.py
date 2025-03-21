@@ -48,11 +48,14 @@ class MarkdownGeneratorApp:
         self.root.title("Markdown Generator")
         self.root.geometry("800x600")
         self.directory = ""
-        self.gitignore_patterns = []
+        self.ignore_patterns = []
         self.observer = None
+        self.refresh_timer = None  # For debouncing selection changes
 
         logging.info("Initializing Markdown Generator App.")
         self.init_ui()
+
+    
 
     def init_ui(self):
         self.root.columnconfigure(0, weight=1)
@@ -84,44 +87,99 @@ class MarkdownGeneratorApp:
         self.tree.configure(yscrollcommand=self.scrollbar.set)
 
         # Bind single click handler on the treeview (ignoring expand/collapse clicks)
-        self.tree.bind("<Button-1>", self.on_tree_click)
+        self.tree.bind("<Button-1>", self.on_tree_click, add="+")
 
-        # Button to generate markdown
-        self.generate_button = tk.Button(
+        self.start_button = tk.Button(
             self.root,
-            text="Generate Markdown",
-            command=self.generate_markdown,
-            state=tk.DISABLED
+            text="Start Monitoring",
+            command=self.start_monitoring,
+            state=tk.DISABLED # initially disabled
         )
-        self.generate_button.grid(row=2, column=0, pady=10)
+        self.start_button.grid(row=2, column=0, pady=(10, 5))
+
+        self.stop_button = tk.Button(
+            self.root,
+            text="Stop Monitoring",
+            command=self.stop_monitoring,
+            state=tk.DISABLED  # initially disabled
+        )
+        self.stop_button.grid(row=3, column=0, pady=(5, 10))
+
+    def start_monitoring(self):
+        selected_files = self.get_selected_files()
+        if not selected_files:
+            messagebox.showwarning("No files selected", "Please select at least one file.")
+            return
+
+        # Generate the markdown file initially
+        self.generate_markdown()
+
+        # Set up file watchers for live updates
+        self.setup_file_watchers(selected_files)
+
+        # Update buttons
+        self.start_button.config(state=tk.DISABLED)
+        self.stop_button.config(state=tk.NORMAL)
+        logging.info("Monitoring started.")
+
+    def stop_monitoring(self):
+        if self.observer:
+            logging.info("Stopping file watchers.")
+            self.observer.stop()
+            self.observer.join()
+            self.observer = None
+            messagebox.showinfo("Stopped", "File monitoring has been stopped.")
+
+        # Update buttons
+        self.start_button.config(state=tk.NORMAL)
+        self.stop_button.config(state=tk.DISABLED)
+
 
     def on_tree_click(self, event):
-        """Handle clicks on the Treeview while ignoring the expand/collapse arrows."""
-        element = self.tree.identify("element", event.x, event.y)
-        if element in ("open", "close"):
-            return
+        try:
+            item = self.tree.identify_row(event.y)
+            if not item:
+                return
 
-        region = self.tree.identify("region", event.x, event.y)
-        if region != "tree":
-            return
+            # Determine the level (depth) of the item by counting its ancestors.
+            level = 0
+            parent = self.tree.parent(item)
+            while parent:
+                level += 1
+                parent = self.tree.parent(parent)
 
-        item = self.tree.identify_row(event.y)
-        if not item:
-            return
+            indent = 20
+            OPEN_BUTTON_WIDTH = 20
 
-        tags = self.tree.item(item, "tags")
-        if not tags:
-            return
+            if event.x < (level * indent + OPEN_BUTTON_WIDTH):
+                return
 
-        # Toggle checked/unchecked state
-        if 'unchecked' in tags:
-            self.check_item(item)
-            logging.debug(f"Checked item: {self.tree.item(item, 'text')}")
-        else:
-            self.uncheck_item(item)
-            logging.debug(f"Unchecked item: {self.tree.item(item, 'text')}")
+            tags = self.tree.item(item, "tags")
+            if 'checked' in tags:
+                self.uncheck_item(item)
+                logging.debug(f"Unchecked item: {self.tree.item(item, 'text')}")
+            else:
+                self.check_item(item)
+                logging.debug(f"Checked item: {self.tree.item(item, 'text')}")
+            
+            self.check_generate_button_state()  # Now uses start_button
 
-        self.check_generate_button_state()
+            # If monitoring is active, debounce and refresh the markdown
+            if self.observer:
+                if self.refresh_timer:
+                    self.root.after_cancel(self.refresh_timer)
+                self.refresh_timer = self.root.after(500, self.refresh_selection)
+            return "break"
+        except Exception:
+            logging.exception("Error in on_tree_click callback")
+            raise
+
+
+    def refresh_selection(self):
+        logging.info("Selection changed; refreshing markdown file.")
+        self.generate_markdown(show_message=False)
+        self.refresh_timer = None  # Reset the timer variable
+
 
     def open_directory(self):
         self.directory = filedialog.askdirectory()
@@ -141,52 +199,87 @@ class MarkdownGeneratorApp:
         self.check_generate_button_state()
 
     def load_gitignore(self):
-        """Load ignore patterns from .gitignore in the selected directory."""
-        self.gitignore_patterns = []
+        """Load ignore patterns from .gitignore in the selected directory and add hardcoded patterns."""
+        self.ignore_patterns = []
         gitignore_path = os.path.join(self.directory, '.gitignore')
         if os.path.exists(gitignore_path):
             try:
-                # Use 'utf-8-sig' to handle any BOM that may be present
+                # Use 'utf-8-sig' to handle BOM if present
                 with open(gitignore_path, 'r', encoding="utf-8-sig") as f:
                     for line in f:
                         pattern = line.strip()
                         if pattern and not pattern.startswith('#'):
-                            self.gitignore_patterns.append(pattern)
-                logging.info(f"Loaded {len(self.gitignore_patterns)} .gitignore patterns: {self.gitignore_patterns}")
+                            self.ignore_patterns.append(pattern)
+                logging.info(f"Loaded {len(self.ignore_patterns)} .gitignore patterns from file: {self.ignore_patterns}")
             except Exception as e:
                 logging.error(f"Error reading .gitignore: {str(e)}")
                 messagebox.showerror("Error", f"Error reading .gitignore: {str(e)}")
         else:
             logging.info("No .gitignore file found.")
 
+        # Add additional hardcoded patterns
+        additional_patterns = [
+            ".git/", 
+            ".gitignore", 
+            "requirements.txt", 
+            "package-lock.json",
+            "*.ico",
+            "*.png",
+            "*.jpg",
+            "*.jpeg",
+            "*.gif",
+            "*.bmp",
+            "*.tiff",
+            "*.svg",
+            "*.bin",
+            "*.exe",
+            "*.dll",
+            "*.lib",
+            "*.exp",
+            "*.obj",
+            "*.def",
+            "*.db",
+            "*.sqlite*",
+            "*.log",
+            "*.tmp"
+            ]
+        self.ignore_patterns.extend(additional_patterns)
+        logging.info(f"Total number of ignore patterns: {len(self.ignore_patterns)}")
+        logging.debug(f"Ignore patterns: {self.ignore_patterns}")
 
     def is_ignored(self, path):
-        """Determine if the given path should be ignored based on .gitignore patterns.
+        """Determine if the given path should be ignored based on .gitignore and hardcoded patterns.
         
-        Converts the path to a relative path with forward slashes. For directory patterns
-        (those ending with '/'), it checks if any segment of the relative path matches the
-        wildcard pattern using fnmatch.
+        The function converts the path to a relative path (using forward slashes). For directory
+        patterns (ending with '/'), it checks if any segment of the path matches the wildcard pattern.
+        For patterns that don't contain a slash, it checks the basename (so that a pattern like 
+        'package-lock.json' will match regardless of its directory).
         """
         relative_path = os.path.relpath(path, self.directory)
         relative_path = relative_path.replace(os.sep, '/')
         if relative_path.startswith(".git/") or relative_path == ".git":
             return True
 
-        for pattern in self.gitignore_patterns:
-            # Handle patterns starting with a slash as relative to the project root.
+        for pattern in self.ignore_patterns:
+            # Remove leading slash if present, making the pattern relative to the project root.
             if pattern.startswith('/'):
                 pattern = pattern[1:]
             if pattern.endswith('/'):
-                # Directory pattern: remove the trailing slash and check all segments
+                # For directory patterns, remove trailing slash and check each segment.
                 dir_pattern = pattern.rstrip('/')
                 for segment in relative_path.split('/'):
                     if fnmatch.fnmatch(segment, dir_pattern):
                         return True
             else:
-                if fnmatch.fnmatch(relative_path, pattern):
-                    return True
+                # If the pattern doesn't include a slash, match against the basename.
+                if '/' not in pattern:
+                    if fnmatch.fnmatch(os.path.basename(relative_path), pattern):
+                        return True
+                else:
+                    # Otherwise, match the full relative path.
+                    if fnmatch.fnmatch(relative_path, pattern):
+                        return True
         return False
-
 
     def populate_tree(self, parent_dir, parent_node):
         """Recursively populate the treeview with files and folders, skipping ignored paths."""
@@ -259,12 +352,18 @@ class MarkdownGeneratorApp:
         self.update_parent(item)
 
     def check_generate_button_state(self):
-        if self.get_selected_files():
-            self.generate_button.config(state=tk.NORMAL)
+        # If monitoring is active, always keep the start button disabled.
+        if self.observer is not None:
+            self.start_button.config(state=tk.DISABLED)
         else:
-            self.generate_button.config(state=tk.DISABLED)
+            # Otherwise, enable start button only if there are selected files.
+            if self.get_selected_files():
+                self.start_button.config(state=tk.NORMAL)
+            else:
+                self.start_button.config(state=tk.DISABLED)
 
-    def generate_markdown(self):
+
+    def generate_markdown(self, show_message=True):
         selected_files = self.get_selected_files()
         if not selected_files:
             messagebox.showwarning("No files selected", "Please select at least one file.")
@@ -275,28 +374,21 @@ class MarkdownGeneratorApp:
         output_path = os.path.join(self.directory, "project_structure.md")
 
         try:
-            if os.path.exists(output_path):
-                with open(output_path, "r", encoding="utf-8") as md_file:
-                    existing_content = md_file.read()
-
-                context_start = existing_content.find("## Context")
-                if context_start != -1:
-                    updated_content = existing_content[:context_start] + markdown_content
-                else:
-                    updated_content = existing_content + "\n\n" + markdown_content
-            else:
-                updated_content = markdown_content
-
+            # Overwrite the markdown file completely
             with open(output_path, "w", encoding="utf-8") as md_file:
-                md_file.write(updated_content)
+                md_file.write(markdown_content)
 
-            logging.info(f"Markdown file updated at {output_path}")
-            messagebox.showinfo("Markdown Generated", f"Markdown file updated at {output_path}")
+            logging.info(f"Markdown file written at {output_path}")
+            if show_message:
+                messagebox.showinfo("Markdown Generated", f"Markdown file updated at {output_path}")
 
-            self.setup_file_watchers(selected_files)
+            # Restart file watchers only on a manual generation call
+            if show_message:
+                self.setup_file_watchers(selected_files)
         except UnicodeEncodeError as e:
             logging.error(f"Encoding Error writing markdown: {str(e)}")
             messagebox.showerror("Encoding Error", f"Error writing markdown file: {str(e)}")
+
 
     def get_selected_files(self):
         """Collect all checked files (even if nested) based on treeview state."""
@@ -472,5 +564,10 @@ class FileChangeHandler(FileSystemEventHandler):
 
 if __name__ == "__main__":
     root = tk.Tk()
+
+    def tk_report_callback_exception(exc, val, tb):
+        logging.error("Exception in Tkinter callback", exc_info=(exc, val, tb))
+    root.report_callback_exception = tk_report_callback_exception
+
     app = MarkdownGeneratorApp(root)
     root.mainloop()
